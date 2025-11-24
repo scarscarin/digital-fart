@@ -1,8 +1,14 @@
+const API_BASE =
+  window.API_BASE_URL ||
+  (location.hostname === 'localhost' && location.port === '8080'
+    ? 'http://localhost:8000'
+    : '');
+
 async function fetchArchive() {
   const listEl = document.getElementById('archive-list');
   listEl.textContent = 'Loading…';
   try {
-    const resp = await fetch('/api/archive');
+    const resp = await fetch(`${API_BASE}/api/archive`);
     if (!resp.ok) throw new Error('Failed to load archive');
     const items = await resp.json();
     listEl.textContent = '';

@@ -1,3 +1,9 @@
+const API_BASE =
+  window.API_BASE_URL ||
+  (location.hostname === 'localhost' && location.port === '8080'
+    ? 'http://localhost:8000'
+    : '');
+
 const statusBox = document.getElementById('admin-status');
 const trainBtn = document.getElementById('train-now-btn');
 
@@ -7,7 +13,7 @@ function setStatus(text) {
 
 async function loadStatus() {
   try {
-    const resp = await fetch('/api/training/status');
+    const resp = await fetch(`${API_BASE}/api/training/status`);
     if (!resp.ok) throw new Error('status failed');
     const data = await resp.json();
     const runningText = data.running ? 'Training running' : 'Idle';
@@ -22,7 +28,7 @@ async function loadStatus() {
 async function startTraining() {
   setStatus('Starting training…');
   try {
-    const resp = await fetch('/api/admin/train', { method: 'POST' });
+    const resp = await fetch(`${API_BASE}/api/admin/train`, { method: 'POST' });
     if (resp.status === 409) {
       setStatus('Training already running.');
       return;

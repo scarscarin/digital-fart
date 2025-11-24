@@ -1,3 +1,9 @@
+const API_BASE =
+  window.API_BASE_URL ||
+  (location.hostname === 'localhost' && location.port === '8080'
+    ? 'http://localhost:8000'
+    : '');
+
 const recordTrigger = document.getElementById('record-trigger');
 const statusEl = document.getElementById('record-status');
 const trainingBtn = document.getElementById('start-training-view');
@@ -69,12 +75,13 @@ async function handleRecordingStop() {
 
   updateStatus('Uploading…');
   try {
-    const resp = await fetch('/api/upload', {
+    const resp = await fetch(`${API_BASE}/api/upload`, {
       method: 'POST',
       body: formData,
     });
     if (!resp.ok) {
-      throw new Error('Upload failed');
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`Upload failed: ${resp.status} ${errText}`);
     }
     await resp.json();
     updateStatus('Thanks, your fart has been archived.');
@@ -97,7 +104,7 @@ function appendLog(text, bold = false) {
 }
 
 function connectTrainingStream() {
-  const evtSource = new EventSource('/api/training/stream');
+  const evtSource = new EventSource(`${API_BASE}/api/training/stream`);
   appendLog('Connected to training stream…');
 
   evtSource.onmessage = (event) => {
