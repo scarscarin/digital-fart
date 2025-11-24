@@ -7,7 +7,15 @@ import struct
 import uuid
 from typing import AsyncGenerator, List, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -270,13 +278,21 @@ async def list_archive(db: Session = Depends(get_db)):
 
 @app.post("/api/admin/train")
 async def start_training(
-    payload: TrainRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    payload: Optional[TrainRequest] = Body(default=None),
+    db: Session = Depends(get_db),
 ):
     existing = db.query(TrainingRun).filter(TrainingRun.status == "running").first()
     if existing:
         return JSONResponse(status_code=409, content={"error": "Training already running"})
 
-    duration_minutes = payload.duration_minutes or 10
+    duration_minutes = payload.duration_minutes if payload else 10
+    if not isinstance(duration_minutes, int):
+        try:
+            duration_minutes = int(duration_minutes)
+        except Exception:
+            duration_minutes = 10
+    duration_minutes = max(1, min(duration_minutes, 120))
     run = TrainingRun(status="running", started_at=datetime.utcnow())
     db.add(run)
     db.commit()
