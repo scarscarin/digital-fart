@@ -52,13 +52,13 @@ async function startRecording() {
     mediaRecorder.onstop = handleRecordingStop;
 
     mediaRecorder.start();
-    startCountdown(10);
+    startCountdown(5);
 
     setTimeout(() => {
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
       }
-    }, 10000);
+    }, 5000);
   } catch (err) {
     console.error(err);
     updateStatus('Microphone permission denied or unavailable.');

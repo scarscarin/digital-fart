@@ -6,6 +6,7 @@ const API_BASE =
 
 const statusBox = document.getElementById('admin-status');
 const trainBtn = document.getElementById('train-now-btn');
+const trainDuration = document.getElementById('train-duration');
 
 function setStatus(text) {
   statusBox.textContent = text;
@@ -28,14 +29,22 @@ async function loadStatus() {
 async function startTraining() {
   setStatus('Starting training…');
   try {
-    const resp = await fetch(`${API_BASE}/api/admin/train`, { method: 'POST' });
+    const minutes = parseInt(trainDuration?.value, 10) || 10;
+    const resp = await fetch(`${API_BASE}/api/admin/train`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duration_minutes: minutes }),
+    });
     if (resp.status === 409) {
       setStatus('Training already running.');
       return;
     }
     if (!resp.ok) throw new Error('start failed');
     const data = await resp.json();
-    setStatus(`Training started (ID: ${data.training_id}). Open the landing page training section to see logs.`);
+    setStatus(
+      `Training started (ID: ${data.training_id}) for ${data.duration_minutes} minute(s). ` +
+        'Open the landing page training section to see logs.'
+    );
   } catch (err) {
     console.error(err);
     setStatus('Failed to start training.');
