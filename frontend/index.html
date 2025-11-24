@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>digitalfart.net</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="page">
+    <h1>digitalfart.net</h1>
+    <p class="tagline">Click the fart cloud to record your contribution.</p>
+    <div class="recording-area">
+      <img id="record-trigger" src="https://placekitten.com/400/300" alt="Click to start recording" class="record-image">
+      <div id="record-status" class="status">Click the cloud to start a 10s recording.</div>
+    </div>
+    <div class="actions">
+      <a class="button" href="archive.html">Archive</a>
+    </div>
+
+    <section id="training-section" class="card">
+      <h2>Training mode</h2>
+      <p>Join the live training view to see logs and listen to the freshly generated "normal fart".</p>
+      <button id="start-training-view" class="button">Enter training view</button>
+      <div id="training-log" class="log-box"></div>
+      <audio id="normal-fart-audio" controls class="audio-player"></audio>
+    </section>
+  </main>
+  <script src="js/main.js" defer></script>
+</body>
+</html>
