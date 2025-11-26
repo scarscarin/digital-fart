@@ -1,58 +1,23 @@
-const API_BASE =
-  window.API_BASE_URL ||
-  (location.hostname === 'localhost' && location.port === '8080'
-    ? 'http://localhost:8000'
-    : '');
+const API_BASE = window.API_BASE || 'http://localhost:8000';
 
-const statusBox = document.getElementById('admin-status');
-const trainBtn = document.getElementById('train-now-btn');
-const trainDuration = document.getElementById('train-duration');
-
-function setStatus(text) {
-  statusBox.textContent = text;
-}
-
-async function loadStatus() {
-  try {
-    const resp = await fetch(`${API_BASE}/api/training/status`);
-    if (!resp.ok) throw new Error('status failed');
-    const data = await resp.json();
-    const runningText = data.running ? 'Training running' : 'Idle';
-    const outputText = data.output_url ? `Last output: ${data.output_url}` : 'No output yet';
-    setStatus(`${runningText}. ${outputText}`);
-  } catch (err) {
-    console.error(err);
-    setStatus('Could not load status.');
-  }
-}
+const trainImage = document.getElementById('train-image');
+const statusEl = document.getElementById('admin-status');
 
 async function startTraining() {
-  setStatus('Starting training…');
+  statusEl.textContent = 'Starting training…';
   try {
-    const minutes = parseInt(trainDuration?.value, 10) || 10;
-    const resp = await fetch(`${API_BASE}/api/admin/train`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ duration_minutes: minutes }),
-    });
-    if (resp.status === 409) {
-      setStatus('Training already running.');
-      return;
+    const res = await fetch(`${API_BASE}/start-training`, { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Unable to start training');
     }
-    if (!resp.ok) throw new Error('start failed');
-    const data = await resp.json();
-    setStatus(
-      `Training started (ID: ${data.training_id}) for ${data.duration_minutes} minute(s). ` +
-        'Open the landing page training section to see logs.'
-    );
+    statusEl.textContent = 'Training started! Watching for progress…';
   } catch (err) {
     console.error(err);
-    setStatus('Failed to start training.');
+    statusEl.textContent = `Error: ${err.message}`;
   }
 }
 
-trainBtn?.addEventListener('click', startTraining);
-document.addEventListener('DOMContentLoaded', () => {
-  loadStatus();
-  setInterval(loadStatus, 5000);
-});
+if (trainImage) {
+  trainImage.addEventListener('click', startTraining);
+}
