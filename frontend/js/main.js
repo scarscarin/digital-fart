@@ -146,7 +146,8 @@ function ensureSocket() {
 function handleEvent(event) {
   if (event.type === 'training-start') {
     updateCounter(0);
-    setStatus('Training started, keep sniffing the counter.');
+    const duration = event.target_seconds ? Math.round(event.target_seconds / 60) : 10;
+    setStatus(`Training started — running for ${duration} minutes. Keep sniffing the counter.`);
     if (trainingVideo) {
       trainingVideo.src = event.video;
       trainingVideo.style.display = 'block';
@@ -157,6 +158,10 @@ function handleEvent(event) {
   if (event.type === 'training-progress') {
     const farts = event.equivalent_farts || 0;
     updateCounter(farts);
+    if (typeof event.progress === 'number') {
+      const pct = Math.min(100, Math.max(0, Math.round(event.progress * 100)));
+      setStatus(`Training in progress: ${pct}%`);
+    }
   }
 
   if (event.type === 'training-complete') {

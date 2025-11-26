@@ -26,6 +26,8 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 CPU_POWER_W = 50.0
 GRID_INTENSITY_G_PER_KWH = 400.0
 CO2_PER_FART_G = 0.0160137
+TRAIN_DURATION_SECONDS = 600.0  # 10 minutes of progress updates
+PROGRESS_INTERVAL_SECONDS = 1.0  # update clients roughly every second
 
 app = FastAPI(title="digitalfart.net API")
 
@@ -133,6 +135,8 @@ async def broadcast(payload: dict) -> None:
     for ws in to_remove:
         connected_clients.discard(ws)
 
+    total = count_audio_files()
+    return {"success": True, "filename": filename, "count": total}
 
 @app.post("/upload")
 async def upload_audio(file: UploadFile = File(...)):
@@ -157,17 +161,35 @@ async def upload_audio(file: UploadFile = File(...)):
 
 async def _run_training():
     start_time = time.perf_counter()
-    await broadcast({"type": "training-start", "video": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"})
+    await broadcast(
+        {
+            "type": "training-start",
+            "video": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+            "target_seconds": TRAIN_DURATION_SECONDS,
+        }
+    )
 
     loop = asyncio.get_running_loop()
     try:
-        progress_steps = [0.15, 0.35, 0.55, 0.75]
-        for pct in progress_steps:
+        # Emit a steady stream of progress updates for the full 10-minute window.
+        while True:
             elapsed = time.perf_counter() - start_time
+            progress = min(elapsed / TRAIN_DURATION_SECONDS, 1.0)
             _, co2_g, equivalent_farts = compute_emissions(elapsed)
-            await broadcast({"type": "training-progress", "progress": pct, "co2_g": co2_g, "equivalent_farts": equivalent_farts})
-            await asyncio.sleep(0.5)
+            await broadcast(
+                {
+                    "type": "training-progress",
+                    "progress": progress,
+                    "co2_g": co2_g,
+                    "equivalent_farts": equivalent_farts,
+                    "elapsed": elapsed,
+                }
+            )
+            if progress >= 1.0:
+                break
+            await asyncio.sleep(PROGRESS_INTERVAL_SECONDS)
 
+        # After the timed progress loop, do the actual synthesis work.
         grains, sr = await loop.run_in_executor(None, load_farts_to_grains)
         fart_audio = await loop.run_in_executor(None, generate_fart_from_grains, grains, sr, 5.0)
         await loop.run_in_executor(None, sf.write, GENERATED_AUDIO_PATH, fart_audio, sr)
@@ -187,6 +209,11 @@ async def _run_training():
     except Exception as exc:  # pragma: no cover - broadcast failures to clients
         await broadcast({"type": "training-error", "message": str(exc)})
 
+@app.post("/start-training")
+async def start_training(background_tasks: BackgroundTasks):
+    global training_task
+    if training_task and not training_task.done():
+        raise HTTPException(status_code=400, detail="Training already running")
 
 @app.post("/start-training")
 async def start_training(background_tasks: BackgroundTasks):
