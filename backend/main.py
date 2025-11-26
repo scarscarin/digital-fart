@@ -135,6 +135,8 @@ async def broadcast(payload: dict) -> None:
     for ws in to_remove:
         connected_clients.discard(ws)
 
+    total = count_audio_files()
+    return {"success": True, "filename": filename, "count": total}
 
 @app.post("/upload")
 async def upload_audio(file: UploadFile = File(...)):
@@ -207,6 +209,11 @@ async def _run_training():
     except Exception as exc:  # pragma: no cover - broadcast failures to clients
         await broadcast({"type": "training-error", "message": str(exc)})
 
+@app.post("/start-training")
+async def start_training(background_tasks: BackgroundTasks):
+    global training_task
+    if training_task and not training_task.done():
+        raise HTTPException(status_code=400, detail="Training already running")
 
 @app.post("/start-training")
 async def start_training(background_tasks: BackgroundTasks):
