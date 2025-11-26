@@ -1,377 +1,287 @@
 import asyncio
-from datetime import datetime, timedelta
 import json
-import math
-import os
-import struct
-import uuid
-from typing import AsyncGenerator, List, Optional
+import random
+import subprocess
+import time
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import List, Optional, Set
 
-from fastapi import (
-    BackgroundTasks,
-    Body,
-    Depends,
-    FastAPI,
-    File,
-    HTTPException,
-    UploadFile,
-)
+import aiofiles
+import numpy as np
+import soundfile as sf
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine, desc
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
-import uvicorn
-import torch
-import torch.nn as nn
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AUDIO_DIR = os.path.join(BASE_DIR, "audio")
-GENERATED_DIR = os.path.join(BASE_DIR, "generated")
-DB_PATH = os.path.join(BASE_DIR, "db.sqlite3")
+BASE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
+AUDIO_DIR = BASE_DIR / "audio"
+STATIC_DIR = BASE_DIR / "static"
+GENERATED_AUDIO_PATH = STATIC_DIR / "generated_fart.wav"
 
-os.makedirs(AUDIO_DIR, exist_ok=True)
-os.makedirs(GENERATED_DIR, exist_ok=True)
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-DATABASE_URL = f"sqlite:///{DB_PATH}"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-class Fart(Base):
-    __tablename__ = "farts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    filename = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    duration_seconds = Column(Float, nullable=True)
-
-
-class TrainingRun(Base):
-    __tablename__ = "training_runs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    started_at = Column(DateTime, default=datetime.utcnow)
-    finished_at = Column(DateTime, nullable=True)
-    status = Column(String, nullable=False)
-    output_filename = Column(String, nullable=True)
-
-
-Base.metadata.create_all(bind=engine)
+CPU_POWER_W = 50.0
+GRID_INTENSITY_G_PER_KWH = 400.0
+CO2_PER_FART_G = 0.0160137
+TRAIN_DURATION_SECONDS = 600.0  # 10 minutes of progress updates
+PROGRESS_INTERVAL_SECONDS = 1.0  # update clients roughly every second
 
 app = FastAPI(title="digitalfart.net API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
-# Mount static directories for audio playback
-app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
-app.mount("/generated", StaticFiles(directory=GENERATED_DIR), name="generated")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+connected_clients: Set[WebSocket] = set()
+training_task: Optional[asyncio.Task] = None
+latest_event: Optional[dict] = None
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def count_audio_files() -> int:
+    return len([p for p in AUDIO_DIR.iterdir() if p.is_file()])
 
 
-# In-memory queues for SSE subscribers
-subscriber_queues: List[asyncio.Queue] = []
+def compute_emissions(elapsed_seconds: float):
+    energy_wh = CPU_POWER_W * elapsed_seconds / 3600.0
+    energy_kwh = energy_wh / 1000.0
+    co2_g = energy_kwh * GRID_INTENSITY_G_PER_KWH
+    equivalent_farts = co2_g / CO2_PER_FART_G
+    return energy_wh, co2_g, equivalent_farts
 
 
-class TrainRequest(BaseModel):
-    duration_minutes: Optional[int] = Field(10, ge=1, le=120, description="Length of training in minutes")
+def convert_webm_to_wav(src: Path, dst: Path) -> None:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-ac",
+        "1",
+        "-ar",
+        "22050",
+        str(dst),
+    ]
+    completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed for {src}: {completed.stderr.decode(errors='ignore')}")
 
 
-async def broadcast_message(message: dict) -> None:
-    for queue in list(subscriber_queues):
-        await queue.put(message)
+def load_farts_to_grains():
+    grains: List[np.ndarray] = []
+    sr = 22050
+    grain_samples = int(0.03 * sr)
+    hop = max(1, grain_samples // 2)
+
+    with TemporaryDirectory() as tmpdir:
+        for path in AUDIO_DIR.glob("*.webm"):
+            wav_path = Path(tmpdir) / f"{path.stem}.wav"
+            convert_webm_to_wav(path, wav_path)
+            data, sr = sf.read(wav_path)
+            if data.ndim > 1:
+                data = np.mean(data, axis=1)
+            for start in range(0, max(0, len(data) - grain_samples + 1), hop):
+                grain = data[start : start + grain_samples]
+                if len(grain) == grain_samples:
+                    grains.append(grain.astype(np.float32))
+    return np.array(grains), sr
 
 
-def estimate_energy_co2(elapsed_seconds: int, cpu_power_watts: float = 35.0, emission_factor_kg_per_kwh: float = 0.4):
-    """Return tuple of (energy_kwh, co2_grams) using a simple linear estimate."""
-    energy_kwh = (cpu_power_watts / 1000.0) * (elapsed_seconds / 3600.0)
-    co2_grams = energy_kwh * emission_factor_kg_per_kwh * 1000
-    return energy_kwh, co2_grams
+def generate_fart_from_grains(grains: np.ndarray, sr: int = 22050, duration_seconds: float = 5.0):
+    total_samples = int(sr * duration_seconds)
+    if grains.size == 0:
+        return np.zeros(total_samples, dtype=np.float32)
+
+    fade_len = 192
+    output = np.zeros(total_samples, dtype=np.float32)
+    position = 0
+
+    while position < total_samples:
+        grain = random.choice(grains).astype(np.float32)
+        if len(grain) < fade_len * 2:
+            fade = max(1, len(grain) // 4)
+        else:
+            fade = fade_len
+        fade_in = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        fade_out = np.linspace(1.0, 0.0, fade, dtype=np.float32)
+        grain[:fade] *= fade_in
+        grain[-fade:] *= fade_out
+
+        end = min(position + len(grain), total_samples)
+        chunk = grain[: end - position]
+        output[position:end] += chunk
+        position += len(chunk)
+
+    max_amp = np.max(np.abs(output))
+    if max_amp > 1e-6:
+        output = output / max_amp * 0.9
+    return output
 
 
-async def simulate_training(run_id: int, duration_minutes: int) -> None:
-    db: Session = SessionLocal()
-    try:
-        # Real neural network: tiny 1D autoencoder trained on synthetic sine waves
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = nn.Sequential(
-            nn.Conv1d(1, 8, kernel_size=9, padding=4),
-            nn.ReLU(),
-            nn.Conv1d(8, 1, kernel_size=9, padding=4),
-        ).to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-        loss_fn = nn.MSELoss()
-
-        total_seconds = duration_minutes * 60
-        start_time = datetime.utcnow()
-        end_time = start_time + timedelta(seconds=total_seconds)
-        step = 0
-        last_log = start_time
-        await broadcast_message(
-            {
-                "type": "log",
-                "message": (
-                    f"Bootstrapping real neural net on {device.type.upper()} for {duration_minutes} minute(s). "
-                    f"Target duration: {total_seconds} seconds."
-                ),
-            }
-        )
-        last_energy = last_co2 = 0.0
-
-        def make_batch(batch_size: int = 8, sample_len: int = 1024):
-            t = torch.linspace(0, 1, sample_len, device=device).unsqueeze(0).unsqueeze(0)
-            freq = torch.rand(batch_size, 1, 1, device=device) * 6 + 1
-            signal = torch.sin(2 * math.pi * freq * t)
-            noise = 0.05 * torch.randn(batch_size, 1, sample_len, device=device)
-            data = signal + noise
-            return data, data  # autoencoder target is the input itself
-
-        while datetime.utcnow() < end_time:
-            inputs, targets = make_batch()
-            optimizer.zero_grad(set_to_none=True)
-            outputs = model(inputs)
-            loss = loss_fn(outputs, targets)
-            loss.backward()
-            optimizer.step()
-            step += 1
-
-            now = datetime.utcnow()
-            elapsed = (now - start_time).total_seconds()
-            remaining = max(0.0, total_seconds - elapsed)
-            # Estimate resource usage: assume 35W baseline CPU, 100W if GPU
-            cpu_power = 100.0 if device.type == "cuda" else 35.0
-            energy_kwh, co2_g = estimate_energy_co2(int(elapsed), cpu_power)
-            last_energy, last_co2 = energy_kwh, co2_g
-
-            if (now - last_log).total_seconds() >= 1:
-                progress = min(100.0, (elapsed / total_seconds) * 100)
-                await broadcast_message(
-                    {
-                        "type": "log",
-                        "message": (
-                            f"Step {step} | loss={loss.item():.5f} | progress={progress:.1f}% | "
-                            f"remaining={remaining:.1f}s | power~{cpu_power:.1f}W | "
-                            f"energy~{energy_kwh:.4f} kWh | co2~{co2_g:.2f} g"
-                        ),
-                    }
-                )
-                last_log = now
-
-            # Yield control very briefly to keep the event loop responsive
-            await asyncio.sleep(0)
-
-        # If we exit slightly early due to loop timing, top up with sleep to hit the target duration
-        final_elapsed = (datetime.utcnow() - start_time).total_seconds()
-        if final_elapsed < total_seconds:
-            await asyncio.sleep(total_seconds - final_elapsed)
-
-        # Build output file from a trained sample
-        model.eval()
-        with torch.no_grad():
-            sample_in, _ = make_batch(batch_size=1)
-            generated = model(sample_in).cpu().squeeze().numpy()
-
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        output_filename = f"normal_fart_{timestamp}.wav"
-        output_path = os.path.join(GENERATED_DIR, output_filename)
-
-        # Convert float waveform (-1..1) to 16-bit PCM WAV
-        int_data = (generated * 32767.0).clip(-32768, 32767).astype("int16")
-        with open(output_path, "wb") as f:
-            # Minimal RIFF/WAV header
-            num_channels = 1
-            sample_rate = 16000
-            byte_rate = sample_rate * num_channels * 2
-            block_align = num_channels * 2
-            bits_per_sample = 16
-            data_bytes = int_data.tobytes()
-            f.write(b"RIFF")
-            f.write(struct.pack("<I", 36 + len(data_bytes)))
-            f.write(b"WAVEfmt ")
-            f.write(struct.pack("<IHHIIHH", 16, 1, num_channels, sample_rate, byte_rate, block_align, bits_per_sample))
-            f.write(b"data")
-            f.write(struct.pack("<I", len(data_bytes)))
-            f.write(data_bytes)
-
-        # Update training run status
-        run: TrainingRun = db.query(TrainingRun).filter(TrainingRun.id == run_id).first()
-        if run:
-            run.status = "completed"
-            run.finished_at = datetime.utcnow()
-            run.output_filename = output_filename
-            db.commit()
-        await broadcast_message(
-            {
-                "type": "log",
-                "message": (
-                    f"Training finished after {duration_minutes} minute(s). Total energy ~{last_energy:.4f} kWh; "
-                    f"estimated CO2 ~{last_co2:.2f} g. Writing output {output_filename}."
-                ),
-            }
-        )
-        await broadcast_message({"type": "done", "url": f"/generated/{output_filename}"})
-    except Exception as exc:  # pragma: no cover - safety
-        run: TrainingRun = db.query(TrainingRun).filter(TrainingRun.id == run_id).first()
-        if run:
-            run.status = "failed"
-            run.finished_at = datetime.utcnow()
-            db.commit()
-        await broadcast_message({"type": "log", "message": f"Training failed: {exc}"})
-    finally:
-        db.close()
+async def broadcast(payload: dict) -> None:
+    global latest_event
+    latest_event = payload
+    to_remove: List[WebSocket] = []
+    for ws in connected_clients:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            to_remove.append(ws)
+    for ws in to_remove:
+        connected_clients.discard(ws)
 
 
-@app.post("/api/upload")
-async def upload_fart(file: UploadFile = File(...), db: Session = Depends(get_db)):
+@app.post("/upload")
+async def upload_audio(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
+    filename = f"fart_{int(time.time() * 1000)}.webm"
+    save_path = AUDIO_DIR / filename
 
-    ext = os.path.splitext(file.filename)[1] or ".webm"
-    unique_name = f"{uuid.uuid4()}{ext}"
-    save_path = os.path.join(AUDIO_DIR, unique_name)
-
-    with open(save_path, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
-
-    fart = Fart(filename=unique_name, created_at=datetime.utcnow())
-    db.add(fart)
-    db.commit()
-    db.refresh(fart)
-
-    return {
-        "id": fart.id,
-        "filename": fart.filename,
-        "url": f"/audio/{fart.filename}",
-        "created_at": fart.created_at.isoformat() + "Z",
-    }
-
-
-@app.get("/api/archive")
-async def list_archive(db: Session = Depends(get_db)):
-    farts = db.query(Fart).order_by(desc(Fart.created_at)).all()
-    return [
-        {
-            "id": fart.id,
-            "url": f"/audio/{fart.filename}",
-            "created_at": fart.created_at.isoformat() + "Z",
-            "duration_seconds": fart.duration_seconds,
-        }
-        for fart in farts
-    ]
-
-
-@app.post("/api/admin/train")
-async def start_training(
-    background_tasks: BackgroundTasks,
-    payload: Optional[TrainRequest] = Body(default=None),
-    db: Session = Depends(get_db),
-):
-    existing = db.query(TrainingRun).filter(TrainingRun.status == "running").first()
-    if existing:
-        return JSONResponse(status_code=409, content={"error": "Training already running"})
-
-    duration_minutes = payload.duration_minutes if payload else 10
-    if not isinstance(duration_minutes, int):
-        try:
-            duration_minutes = int(duration_minutes)
-        except Exception:
-            duration_minutes = 10
-    duration_minutes = max(1, min(duration_minutes, 120))
-    run = TrainingRun(status="running", started_at=datetime.utcnow())
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-
-    background_tasks.add_task(simulate_training, run.id, duration_minutes)
-
-    return {"started": True, "training_id": run.id, "duration_minutes": duration_minutes}
-
-
-@app.get("/api/training/status")
-async def training_status(db: Session = Depends(get_db)):
-    running = db.query(TrainingRun).filter(TrainingRun.status == "running").order_by(desc(TrainingRun.started_at)).first()
-    last_run = db.query(TrainingRun).order_by(desc(TrainingRun.started_at)).first()
-
-    if running:
-        target = running
-        is_running = True
-    else:
-        target = last_run
-        is_running = False
-
-    if not target:
-        return {
-            "running": False,
-            "training_id": None,
-            "started_at": None,
-            "finished_at": None,
-            "status": None,
-            "output_url": None,
-        }
-
-    output_url = f"/generated/{target.output_filename}" if target.output_filename else None
-
-    return {
-        "running": is_running,
-        "training_id": target.id,
-        "started_at": target.started_at.isoformat() + "Z" if target.started_at else None,
-        "finished_at": target.finished_at.isoformat() + "Z" if target.finished_at else None,
-        "status": target.status,
-        "output_url": output_url,
-    }
-
-
-@app.get("/api/normal_fart/current")
-async def current_normal_fart(db: Session = Depends(get_db)):
-    run = (
-        db.query(TrainingRun)
-        .filter(TrainingRun.status == "completed", TrainingRun.output_filename.isnot(None))
-        .order_by(desc(TrainingRun.finished_at))
-        .first()
-    )
-    if not run:
-        raise HTTPException(status_code=404, detail={"output_url": None})
-
-    return {
-        "training_id": run.id,
-        "output_url": f"/generated/{run.output_filename}",
-    }
-
-
-@app.get("/api/training/stream")
-async def training_stream() -> StreamingResponse:
-    queue: asyncio.Queue = asyncio.Queue()
-    subscriber_queues.append(queue)
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        try:
+    try:
+        async with aiofiles.open(save_path, "wb") as buffer:
             while True:
-                message = await queue.get()
-                yield f"data: {json.dumps(message)}\n\n"
-        except asyncio.CancelledError:
-            raise
-        finally:
-            if queue in subscriber_queues:
-                subscriber_queues.remove(queue)
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                await buffer.write(chunk)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save audio: {exc}")
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    total = count_audio_files()
+    return {"success": True, "filename": filename, "count": total}
+
+
+async def _run_training():
+    start_time = time.perf_counter()
+    await broadcast(
+        {
+            "type": "training-start",
+            "video": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+            "target_seconds": TRAIN_DURATION_SECONDS,
+        }
+    )
+
+    loop = asyncio.get_running_loop()
+    try:
+        # Emit a steady stream of progress updates for the full 10-minute window.
+        while True:
+            elapsed = time.perf_counter() - start_time
+            progress = min(elapsed / TRAIN_DURATION_SECONDS, 1.0)
+            _, co2_g, equivalent_farts = compute_emissions(elapsed)
+            await broadcast(
+                {
+                    "type": "training-progress",
+                    "progress": progress,
+                    "co2_g": co2_g,
+                    "equivalent_farts": equivalent_farts,
+                    "elapsed": elapsed,
+                }
+            )
+            if progress >= 1.0:
+                break
+            await asyncio.sleep(PROGRESS_INTERVAL_SECONDS)
+
+        # After the timed progress loop, do the actual synthesis work.
+        grains, sr = await loop.run_in_executor(None, load_farts_to_grains)
+        fart_audio = await loop.run_in_executor(None, generate_fart_from_grains, grains, sr, 5.0)
+        await loop.run_in_executor(None, sf.write, GENERATED_AUDIO_PATH, fart_audio, sr)
+
+        elapsed = time.perf_counter() - start_time
+        energy_wh, co2_g, equivalent_farts = compute_emissions(elapsed)
+        await broadcast(
+            {
+                "type": "training-complete",
+                "runtime_seconds": elapsed,
+                "energy_Wh": energy_wh,
+                "co2_g": co2_g,
+                "equivalent_farts": equivalent_farts,
+                "audio": "/static/generated_fart.wav",
+            }
+        )
+    except Exception as exc:  # pragma: no cover - broadcast failures to clients
+        await broadcast({"type": "training-error", "message": str(exc)})
+
+
+@app.post("/start-training")
+async def start_training(background_tasks: BackgroundTasks):
+    global training_task
+    if training_task and not training_task.done():
+        raise HTTPException(status_code=400, detail="Training already running")
+
+    training_task = asyncio.create_task(_run_training())
+    return {"status": "started"}
+
+
+@app.get("/audio-count")
+async def audio_count():
+    return {"count": count_audio_files()}
+
+
+async def _events(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.add(websocket)
+    try:
+        await websocket.send_json({"type": "connected", "audio_files": count_audio_files()})
+    except Exception:
+        pass
+    if latest_event:
+        try:
+            await websocket.send_json(latest_event)
+        except Exception:
+            pass
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data:
+                # Clients can ping to keep connection alive
+                await websocket.send_text(json.dumps({"echo": data}))
+    except WebSocketDisconnect:
+        connected_clients.discard(websocket)
+    except Exception:
+        connected_clients.discard(websocket)
+
+
+@app.websocket("/ws/events")
+async def events_alias(websocket: WebSocket):
+    await _events(websocket)
+
+
+@app.websocket("/ws/train-progress")
+async def train_progress(websocket: WebSocket):
+    await _events(websocket)
+
+
+@app.get("/")
+async def root():
+    index_path = FRONTEND_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return JSONResponse({"status": "ok", "audio_files": count_audio_files()})
+
+
+@app.get("/admin")
+async def admin_page():
+    admin_path = FRONTEND_DIR / "admin.html"
+    if admin_path.exists():
+        return FileResponse(admin_path)
+    raise HTTPException(status_code=404, detail="Admin page missing")
+
+
+# Serve the frontend assets (CSS/JS/images) from the repo's frontend directory.
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
