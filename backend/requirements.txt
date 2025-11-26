@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
-sqlalchemy
 aiofiles
 python-multipart
-torch
+numpy
+soundfile
+pydub
