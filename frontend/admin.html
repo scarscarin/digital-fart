@@ -7,16 +7,13 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <main class="page">
-    <h1>Admin: training control</h1>
-    <p><a class="button" href="index.html">Back to home</a></p>
-    <label class="stacked">
-      Training minutes:
-      <input type="number" id="train-duration" value="10" min="1" max="120">
-    </label>
-    <button id="train-now-btn" class="button">Train now</button>
-    <div id="admin-status" class="status"></div>
+  <main>
+    <h1 class="libre-baskerville-bold">Admin: kick off training</h1>
+    <p><a class="libre-baskerville-bold" href="index.html">Back to home</a></p>
+    <p>Tap the image to start training the fart synthesizer.</p>
+    <img id="train-image" src="https://gizmodo.com/app/uploads/2015/09/1415914174402575245.jpg" alt="Start training" width="300" style="cursor:pointer; max-width: 90vw;" />
+    <div id="admin-status" class="libre-baskerville-bold" style="margin-top: 16px;">Waiting to start…</div>
   </main>
-  <script src="js/admin.js" defer></script>
+  <script src="js/admin.js"></script>
 </body>
 </html>

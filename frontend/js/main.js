@@ -1,133 +1,214 @@
-const API_BASE =
-  window.API_BASE_URL ||
-  (location.hostname === 'localhost' && location.port === '8080'
-    ? 'http://localhost:8000'
-    : '');
+const API_BASE = window.API_BASE || 'http://localhost:8000';
+const RECORD_SECONDS = 5;
 
-const recordTrigger = document.getElementById('record-trigger');
-const statusEl = document.getElementById('record-status');
-const trainingBtn = document.getElementById('start-training-view');
-const logBox = document.getElementById('training-log');
-const normalFartAudio = document.getElementById('normal-fart-audio');
+let recorder = null;
+let stream = null;
+let isRecording = false;
+let allowAutoPlay = false;
+let ws = null;
 
-let mediaRecorder;
-let chunks = [];
-let recordingCountdown;
+const statusEl = document.getElementById('status');
+const staticFrame = document.querySelector('.static-frame');
+const video = document.getElementById('myVideo');
+const recImg = document.getElementById('recImg');
+const co2Counter = document.getElementById('co2-counter');
+const trainingVideo = document.getElementById('training-video');
+const trainButton = document.getElementById('train-button');
+const generatedAudio = document.getElementById('generated-fart');
+const playGenerated = document.getElementById('play-generated');
 
-function updateStatus(message) {
-  statusEl.textContent = message;
+function setStatus(text) {
+  if (statusEl) {
+    statusEl.textContent = text;
+  }
 }
 
-function startCountdown(seconds) {
-  let remaining = seconds;
-  updateStatus(`Recording… ${remaining}`);
-  recordingCountdown = setInterval(() => {
-    remaining -= 1;
-    if (remaining <= 0) {
-      updateStatus('Stopping…');
-      clearInterval(recordingCountdown);
+function updateCounter(farts) {
+  if (co2Counter) {
+    co2Counter.textContent = `CO₂ emitted: ${farts.toFixed(2)} farts equivalent`;
+  }
+}
+
+async function handleClick() {
+  if (isRecording) return;
+
+  allowAutoPlay = window.confirm('Allow the website to automatically play the generated fart when training is finished?');
+
+  try {
+    setStatus('could u give me permission to hear your fart?');
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    setStatus('GO! AS FARTY AS YOU CAN!');
+    startVideoAnimation();
+    startRecording(stream);
+    setTimeout(stopRecordingAndUpload, RECORD_SECONDS * 1000);
+  } catch (err) {
+    console.error(err);
+    setStatus('Microphone access denied or unavailable. Maybe do a dance, instead?');
+  }
+}
+
+function startVideoAnimation() {
+  if (!staticFrame || !video) return;
+  staticFrame.style.display = 'none';
+  video.style.display = 'inline-block';
+  video.currentTime = 0;
+  video.play();
+
+  video.onended = () => {
+    if (isRecording) {
+      video.currentTime = 0;
+      video.play();
     } else {
-      updateStatus(`Recording… ${remaining}`);
+      video.style.display = 'none';
+      staticFrame.style.display = 'inline-block';
     }
-  }, 1000);
+  };
 }
 
-async function startRecording() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    updateStatus('Your browser does not support recording.');
-    return;
-  }
-
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
-    chunks = [];
-
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    };
-
-    mediaRecorder.onstop = handleRecordingStop;
-
-    mediaRecorder.start();
-    startCountdown(5);
-
-    setTimeout(() => {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      }
-    }, 5000);
-  } catch (err) {
-    console.error(err);
-    updateStatus('Microphone permission denied or unavailable.');
-  }
+function startRecording(mediaStream) {
+  isRecording = true;
+  recorder = RecordRTC(mediaStream, {
+    type: 'audio',
+    mimeType: 'audio/webm',
+    recorderType: RecordRTC.StereoAudioRecorder,
+    numberOfAudioChannels: 1,
+    desiredSampRate: 48000,
+  });
+  recorder.startRecording();
 }
 
-async function handleRecordingStop() {
-  clearInterval(recordingCountdown);
-  updateStatus('Preparing upload…');
+function stopRecordingAndUpload() {
+  if (!recorder || !isRecording) return;
 
-  const blob = new Blob(chunks, { type: 'audio/webm' });
-  const formData = new FormData();
-  formData.append('file', blob, `fart-${Date.now()}.webm`);
+  setStatus('Wow, what a *prrr*. Im not closing the microphone...');
 
-  updateStatus('Uploading…');
-  try {
-    const resp = await fetch(`${API_BASE}/api/upload`, {
-      method: 'POST',
-      body: formData,
-    });
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      throw new Error(`Upload failed: ${resp.status} ${errText}`);
+  recorder.stopRecording(async () => {
+    isRecording = false;
+    if (video) {
+      video.pause();
+      video.style.display = 'none';
     }
-    await resp.json();
-    updateStatus('Thanks, your fart has been archived.');
+    if (staticFrame) {
+      staticFrame.style.display = 'inline-block';
+    }
 
-    const audio = document.createElement('audio');
-    audio.src = URL.createObjectURL(blob);
-    audio.play().catch(() => {});
-  } catch (err) {
-    console.error(err);
-    updateStatus('Upload failed. Please try again.');
-  }
-}
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+    }
 
-function appendLog(text, bold = false) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  if (bold) div.style.fontWeight = 'bold';
-  logBox.appendChild(div);
-  logBox.scrollTop = logBox.scrollHeight;
-}
+    const blob = recorder.getBlob();
+    recorder = null;
 
-function connectTrainingStream() {
-  const evtSource = new EventSource(`${API_BASE}/api/training/stream`);
-  appendLog('Connected to training stream…');
+    setStatus('Uploading to the gassy cloud... 💾');
 
-  evtSource.onmessage = (event) => {
     try {
-      const payload = JSON.parse(event.data);
-      if (payload.type === 'log') {
-        appendLog(payload.message);
-      } else if (payload.type === 'done') {
-        appendLog('Training complete. Playing the new normal fart…', true);
-        if (payload.url) {
-          normalFartAudio.src = payload.url;
-          normalFartAudio.play().catch(() => {});
-        }
+      const formData = new FormData();
+      formData.append('file', blob, 'fart.webm');
+      const response = await fetch(`${API_BASE}/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+      if (response.ok && result.success) {
+        setStatus(`Thank you! Total farts in the vault: ${result.count}`);
+      } else {
+        throw new Error(result.detail || 'Upload failed.');
       }
     } catch (err) {
-      console.error('Bad SSE payload', err, event.data);
+      console.error(err);
+      setStatus('Upload error.');
     }
-  };
-
-  evtSource.onerror = (err) => {
-    console.error('SSE connection error', err);
-  };
+  });
 }
 
-recordTrigger?.addEventListener('click', startRecording);
-trainingBtn?.addEventListener('click', connectTrainingStream);
+function ensureSocket() {
+  if (ws && ws.readyState === WebSocket.OPEN) return ws;
+  ws = new WebSocket(API_BASE.replace('http', 'ws') + '/ws/events');
+  ws.onopen = () => {
+    ws.send('hello');
+  };
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.echo) return;
+      handleEvent(data);
+    } catch (err) {
+      console.error('Bad websocket message', err);
+    }
+  };
+  ws.onclose = () => {
+    setTimeout(ensureSocket, 1000);
+  };
+  return ws;
+}
+
+function handleEvent(event) {
+  if (event.type === 'training-start') {
+    updateCounter(0);
+    setStatus('Training started, keep sniffing the counter.');
+    if (trainingVideo) {
+      trainingVideo.src = event.video;
+      trainingVideo.style.display = 'block';
+      trainingVideo.play().catch(() => {});
+    }
+  }
+
+  if (event.type === 'training-progress') {
+    const farts = event.equivalent_farts || 0;
+    updateCounter(farts);
+  }
+
+  if (event.type === 'training-complete') {
+    const farts = event.equivalent_farts || 0;
+    updateCounter(farts);
+    setStatus('Training finished!');
+    const audioUrl = event.audio ? (event.audio.startsWith('http') ? event.audio : `${API_BASE}${event.audio}`) : '';
+    if (audioUrl) {
+      generatedAudio.src = audioUrl;
+      generatedAudio.load();
+      if (allowAutoPlay) {
+        generatedAudio.play().catch(() => {});
+      } else {
+        playGenerated.style.display = 'inline-block';
+      }
+    }
+  }
+
+  if (event.type === 'training-error') {
+    setStatus(`Training error: ${event.message || 'unknown issue'}`);
+  }
+}
+
+async function startTrainingFromClient() {
+  ensureSocket();
+  updateCounter(0);
+  setStatus('Requesting training…');
+  try {
+    const res = await fetch(`${API_BASE}/start-training`, { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Unable to start training');
+    }
+    setStatus('Training kicked off. Watch the counter.');
+  } catch (err) {
+    console.error(err);
+    setStatus(`Training failed: ${err.message}`);
+  }
+}
+
+if (recImg) {
+  recImg.addEventListener('click', handleClick);
+}
+
+if (trainButton) {
+  trainButton.addEventListener('click', startTrainingFromClient);
+}
+
+if (playGenerated) {
+  playGenerated.addEventListener('click', () => {
+    generatedAudio.play();
+  });
+}
+
+ensureSocket();

@@ -1,31 +1,36 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>digitalfart.net</title>
-  <link rel="stylesheet" href="css/style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Fart</title>
+    <script src="https://cdn.webrtc-experiment.com/RecordRTC.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Caprasimo&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
 </head>
 <body>
-  <main class="page">
-    <h1>digitalfart.net</h1>
-    <p class="tagline">Click the fart cloud to record your contribution.</p>
-    <div class="recording-area">
-      <img id="record-trigger" src="https://placekitten.com/400/300" alt="Click to start recording" class="record-image">
-      <div id="record-status" class="status">Click the cloud to start a 10s recording.</div>
-    </div>
-    <div class="actions">
-      <a class="button" href="archive.html">Archive</a>
-    </div>
+    <main>
+        <div style="margin-top: 20px;">
+            <img src="images/butt.png" id="recImg" class="static-frame media" alt="Tap to record">
+            <video id="myVideo" class="animated-gif media" style="display:none;" autoplay muted playsinline>
+                <source src="images/butt.mp4" type="video/mp4">
+            </video>
+            <p class="libre-baskerville-bold" id="status">Press on the butt to record.</p>
+        </div>
 
-    <section id="training-section" class="card">
-      <h2>Training mode</h2>
-      <p>Join the live training view to see logs and listen to the freshly generated "normal fart".</p>
-      <button id="start-training-view" class="button">Enter training view</button>
-      <div id="training-log" class="log-box"></div>
-      <audio id="normal-fart-audio" controls class="audio-player"></audio>
-    </section>
-  </main>
-  <script src="js/main.js" defer></script>
+        <div class="controls">
+            <button id="train-button" class="libre-baskerville-bold">Train fart from dataset</button>
+            <div id="co2-counter" class="libre-baskerville-bold">CO₂ emitted: 0.00 farts equivalent</div>
+            <video id="training-video" controls muted playsinline></video>
+            <audio id="generated-fart" src="" preload="auto"></audio>
+            <button id="play-generated" class="libre-baskerville-bold">Play generated fart</button>
+            <p class="notice">Uploads land in the backend audio vault; training begins when the admin triggers it.</p>
+            <a id="admin-link" href="admin.html" class="libre-baskerville-bold">Admin view</a>
+        </div>
+    </main>
+
+    <script src="js/main.js"></script>
 </body>
 </html>
