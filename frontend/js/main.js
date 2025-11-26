@@ -1,4 +1,4 @@
-const API_BASE = window.API_BASE || 'http://localhost:8000';
+const API_BASE = (window.API_BASE || window.location.origin || 'http://localhost:8000').replace(/\/$/, '');
 const RECORD_SECONDS = 5;
 
 let recorder = null;
@@ -124,9 +124,11 @@ function stopRecordingAndUpload() {
 
 function ensureSocket() {
   if (ws && ws.readyState === WebSocket.OPEN) return ws;
-  ws = new WebSocket(API_BASE.replace('http', 'ws') + '/ws/events');
+  const wsBase = API_BASE.replace(/^http/, 'ws');
+  ws = new WebSocket(`${wsBase}/ws/train-progress`);
   ws.onopen = () => {
     ws.send('hello');
+    setStatus('Connected to training stream.');
   };
   ws.onmessage = (event) => {
     try {
@@ -138,7 +140,11 @@ function ensureSocket() {
     }
   };
   ws.onclose = () => {
+    setStatus('Training stream closed. Reconnecting…');
     setTimeout(ensureSocket, 1000);
+  };
+  ws.onerror = () => {
+    setStatus('Training stream error — retrying…');
   };
   return ws;
 }

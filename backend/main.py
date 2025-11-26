@@ -12,10 +12,11 @@ import numpy as np
 import soundfile as sf
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
 AUDIO_DIR = BASE_DIR / "audio"
 STATIC_DIR = BASE_DIR / "static"
 GENERATED_AUDIO_PATH = STATIC_DIR / "generated_fart.wav"
@@ -43,6 +44,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 connected_clients: Set[WebSocket] = set()
 training_task: Optional[asyncio.Task] = None
+latest_event: Optional[dict] = None
 
 
 def count_audio_files() -> int:
@@ -126,6 +128,8 @@ def generate_fart_from_grains(grains: np.ndarray, sr: int = 22050, duration_seco
 
 
 async def broadcast(payload: dict) -> None:
+    global latest_event
+    latest_event = payload
     to_remove: List[WebSocket] = []
     for ws in connected_clients:
         try:
@@ -135,8 +139,6 @@ async def broadcast(payload: dict) -> None:
     for ws in to_remove:
         connected_clients.discard(ws)
 
-    total = count_audio_files()
-    return {"success": True, "filename": filename, "count": total}
 
 @app.post("/upload")
 async def upload_audio(file: UploadFile = File(...)):
@@ -209,11 +211,6 @@ async def _run_training():
     except Exception as exc:  # pragma: no cover - broadcast failures to clients
         await broadcast({"type": "training-error", "message": str(exc)})
 
-@app.post("/start-training")
-async def start_training(background_tasks: BackgroundTasks):
-    global training_task
-    if training_task and not training_task.done():
-        raise HTTPException(status_code=400, detail="Training already running")
 
 @app.post("/start-training")
 async def start_training(background_tasks: BackgroundTasks):
@@ -230,10 +227,18 @@ async def audio_count():
     return {"count": count_audio_files()}
 
 
-@app.websocket("/ws/events")
-async def events(websocket: WebSocket):
+async def _events(websocket: WebSocket):
     await websocket.accept()
     connected_clients.add(websocket)
+    try:
+        await websocket.send_json({"type": "connected", "audio_files": count_audio_files()})
+    except Exception:
+        pass
+    if latest_event:
+        try:
+            await websocket.send_json(latest_event)
+        except Exception:
+            pass
     try:
         while True:
             data = await websocket.receive_text()
@@ -246,9 +251,34 @@ async def events(websocket: WebSocket):
         connected_clients.discard(websocket)
 
 
+@app.websocket("/ws/events")
+async def events_alias(websocket: WebSocket):
+    await _events(websocket)
+
+
+@app.websocket("/ws/train-progress")
+async def train_progress(websocket: WebSocket):
+    await _events(websocket)
+
+
 @app.get("/")
 async def root():
+    index_path = FRONTEND_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
     return JSONResponse({"status": "ok", "audio_files": count_audio_files()})
+
+
+@app.get("/admin")
+async def admin_page():
+    admin_path = FRONTEND_DIR / "admin.html"
+    if admin_path.exists():
+        return FileResponse(admin_path)
+    raise HTTPException(status_code=404, detail="Admin page missing")
+
+
+# Serve the frontend assets (CSS/JS/images) from the repo's frontend directory.
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":
